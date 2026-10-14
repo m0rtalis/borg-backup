@@ -65,6 +65,16 @@ docker_setup_borg_env() {
 	export 'BORG_CACHE_DIR'="/app/cache/borg"
 	export 'BORG_CONFIG_DIR'="/app/config/borg"
 
+	file_env 'BORG_PASSPHRASE'
+	if [[ -z "${BORG_PASSPHRASE}" ]]; then
+		if [[ -z "${BORG_PASSCOMMAND:-}" ]]; then
+			echo "BORG_PASSPHRASE, BORG_PASSPHRASE_FILE or BORG_PASSCOMMAND is required"
+			exit 1
+		fi
+		# An empty BORG_PASSPHRASE counts as a real (empty) passphrase and shadows BORG_PASSCOMMAND.
+		unset BORG_PASSPHRASE
+	fi
+
 	var_env 'BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK' "yes"
 	var_env 'BORG_RELOCATED_REPO_ACCESS_IS_OK' "yes"
 }
