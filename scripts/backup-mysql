@@ -11,6 +11,7 @@ backup() {
 	echo "Backup mysql server ${MYSQL_HOST}"
 	MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysqldump \
 		--host="${MYSQL_HOST}" \
+		--port="${MYSQL_PORT}" \
 		--user="root" \
 		--skip-lock-tables \
 		--add-drop-database \
@@ -24,6 +25,7 @@ restore() {
 	echo "Restore mysql server ${MYSQL_HOST}"
 	MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql \
 		--host="${MYSQL_HOST}" \
+		--port="${MYSQL_PORT}" \
 		--user="root" \
 		< "${OTHER_DATA}/mysql-dump.sql"
 }

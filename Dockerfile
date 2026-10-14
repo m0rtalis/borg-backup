@@ -68,7 +68,7 @@ RUN apt-get update \
 COPY --from=builder /borg /rclone /usr/bin/
 COPY ./entrypoint.sh / 
 COPY ./scripts/ /usr/local/bin/ 
-COPY ./rclone.conf /app/config/rclone/rclone.conf
+COPY ./rclone.conf /etc/rclone/rclone.conf
 RUN chmod +x /entrypoint.sh \
 	&& chmod --recursive +x "/usr/local/bin"
 

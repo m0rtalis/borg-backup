@@ -36,6 +36,19 @@ var_env() {
 	export "${var}"="${val}"
 }
 
+# usage: port_env VAR DEFAULT
+port_env() {
+	local var="$1"
+	local def="$2"
+	var_env "${var}" "${def}"
+	if [[ "${!var}" =~ ^[0-9]+$ ]]; then
+		return
+	fi
+	# Kubernetes services and legacy Docker links inject e.g. MYSQL_PORT=tcp://10.0.0.1:3306
+	echo "Warning: ${var}='${!var}' is not a port number, using ${def}"
+	export "${var}"="${def}"
+}
+
 docker_setup_borg_env() {
 	var_env 'ARCHIVE_PREFIX'
 	var_env 'ARCHIVE_BASENAME' "{now:%Y-%m-%dT%H:%M:%S}"
@@ -57,10 +70,16 @@ docker_setup_borg_env() {
 }
 
 docker_setup_rclone_env() {
-	var_env 'BUCKET_NAME' "backup-${HOSTNAME}"
+	# No default: the container hostname changes on recreate, which would orphan the remote copy.
+	var_env 'BUCKET_NAME'
+	if [[ -z "${BUCKET_NAME}" ]]; then
+		echo "BUCKET_NAME is required"
+		exit 1
+	fi
 	var_env 'REMOTE' "s3"
 
-	export 'RCLONE_CONFIG'="/app/config/rclone/rclone.conf"
+	# Outside the /app volume, which would shadow a baked-in config.
+	var_env 'RCLONE_CONFIG' "/etc/rclone/rclone.conf"
 	if [[ ! -f ${RCLONE_CONFIG} ]]; then
 		echo "Warning: No Rclone config found."
 	fi
@@ -72,7 +91,7 @@ docker_setup_mysql_env() {
 	# Do not set default value for MYSQL_HOST.
 	# We use it to determine if a backup should be made.
 	var_env 'MYSQL_HOST'
-	var_env 'MYSQL_PORT' 3306
+	port_env 'MYSQL_PORT' 3306
 	file_env 'MYSQL_ROOT_PASSWORD'
 	var_env 'MYSQL_DATABASE'
 }
@@ -81,17 +100,34 @@ docker_setup_postgres_env() {
 	# Do not set default value for POSTGRES_HOST.
 	# We use it to determine if a backup should be made.
 	var_env 'POSTGRES_HOST'
-	var_env 'POSTGRES_PORT' 5432
+	port_env 'POSTGRES_PORT' 5432
 	file_env 'POSTGRES_USER' 'postgres'
 	file_env 'POSTGRES_PASSWORD'
 
+}
+
+# Holds secrets, hence mode 600. Never filter the dump by grepping: that drops lines whose *value* matches.
+write_container_env() {
+	local var decl flags
+	# Sets mode 600 even if the file survives from an earlier container start
+	install -m 600 /dev/null /container.env
+	for var in $(compgen -e); do
+		decl="$(declare -p "${var}")"
+		flags="${decl#declare }"
+		flags="${flags%% *}"
+		# Readonly variables (UID, SHELLOPTS, ...) would make sourcing the file fail
+		if [[ "${flags}" == *r* ]]; then
+			continue
+		fi
+		echo "${decl}" >> /container.env
+	done
 }
 
 create_cronjob() {
 	var_env 'CRON_BACKUP' "0 2 * * *"
 	var_env 'CRON_PRUNE' "0 4 * * *" 
 	var_env 'CRON_CHECK' "0 6 * * 5"
-	declare -p | grep -Ev 'BASHOPTS|BASH_VERSINFO|EUID|PPID|SHELLOPTS|UID|affinity' > /container.env
+	write_container_env
 	cat > /etc/cron.d/start <<- EOF
 SHELL=/bin/bash
 BASH_ENV=/container.env
