@@ -1,0 +1,4 @@
+deb     [check-valid-until=no] https://snapshot.debian.org/archive/debian/20240204T111800Z/ trixie main
+deb-src [check-valid-until=no] https://snapshot.debian.org/archive/debian/20240204T111800Z/ trixie main
+deb     [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20240204T121501Z/ trixie/updates main
+deb-src [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20240204T121501Z/ trixie/updates main

@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+# shellcheck disable=SC1091
+source /container.env
+
+backup() {
+	echo "Backup mysql server ${MYSQL_HOST}"
+	MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysqldump \
+		--host="${MYSQL_HOST}" \
+		--user="root" \
+		--skip-lock-tables \
+		--add-drop-database \
+		--single-transaction \
+		--databases \
+		"${MYSQL_DATABASE}" \
+		> "${OTHER_DATA}/mysql-dump.sql"
+}
+
+restore() {
+	echo "Restore mysql server ${MYSQL_HOST}"
+	MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql \
+		--host="${MYSQL_HOST}" \
+		--user="root" \
+		< "${OTHER_DATA}/mysql-dump.sql"
+}
+
+if [[ -z "${MYSQL_HOST}" ]]; then
+	exit 0
+fi
+
+if [[ $# == 0 || ($# == 1 && $1 == "backup") ]]; then
+	backup
+elif [[ $# == 1 && $1 == "restore" ]]; then
+	restore
+else
+	echo "Operation $* not supported"
+fi

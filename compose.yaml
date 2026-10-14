@@ -1,0 +1,94 @@
+name: backup
+
+services:
+    backup:
+        build: .
+        profiles:
+            - test
+        restart: no
+        secrets:
+            - borg-repokey
+            - rclone-keyid
+            - rclone-passwd
+            - mysql-dbadminpasswd
+            - postgres-dbadminpasswd
+        volumes:
+            - "~/tmp/borg/data:/data"
+            - "~/tmp/borg/repo:/repo"
+        #      - "~/tmp/borg/app:/app"
+        environment:
+            # BORG
+            - "ARCHIVE_PREFIX=xxx"
+            - "BORG_PASSCOMMAND=cat /run/secrets/borg-repokey"
+
+            # RCLONE
+            - "BUCKET_NAME=fabian-laptop"
+            - "AWS_ACCESS_KEY_ID_FILE=/run/secrets/rclone-keyid"
+            - "AWS_SECRET_ACCESS_KEY_FILE=/run/secrets/rclone-passwd"
+
+            # MISC
+            #- "CRON_PATTERN=* * * * *"
+            - "TZ=Europe/Berlin"
+
+            # MYSQL
+            - "MYSQL_HOST=mysql"
+            - "MYSQL_ROOT_PASSWORD_FILE=/run/secrets/mysql-dbadminpasswd"
+            - "MYSQL_DATABASE=nextcloud"
+
+            # POSTGRES
+            - "POSTGRES_HOST=postgres"
+            - "POSTGRES_USER=postgres"
+            - "POSTGRES_PASSWORD_FILE=/run/secrets/postgres-dbadminpasswd"
+
+    mysql:
+        image: "mariadb:10.11"
+        profiles:
+            - test
+        restart: no
+        command: "--transaction-isolation=READ-COMMITTED --binlog-format=ROW"
+        ports:
+            - "127.0.0.1:3306:3306"
+        volumes:
+            - nextcloud-db:/var/lib/mysql
+        secrets:
+            - mysql-dbadminpasswd
+            - mysql-dbuserpasswd
+        environment:
+            - "MYSQL_DATABASE=nextcloud"
+            - "MYSQL_USER=nextcloud"
+            - "MYSQL_ROOT_PASSWORD_FILE=/run/secrets/mysql-dbadminpasswd"
+            - "MYSQL_PASSWORD_FILE=/run/secrets/mysql-dbuserpasswd"
+            - "MARIADB_AUTO_UPGRADE=1"
+
+    postgres:
+        image: "postgres:13"
+        profiles:
+            - test
+        restart: no
+        ports:
+            - "127.0.0.1:5432:5432"
+        volumes:
+            - "postgres-db:/var/lib/postgresql/data"
+        secrets:
+            - postgres-dbadminpasswd
+        environment:
+            - "POSTGRES_PASSWORD_FILE=/run/secrets/postgres-dbadminpasswd"
+            - "POSTGRES_INITDB_ARGS='--data-checksums'"
+
+secrets:
+    borg-repokey:
+        file: "./test/repokey"
+    rclone-keyid:
+        file: "./test/rclone-keyid"
+    rclone-passwd:
+        file: "./test/rclone-passwd"
+    mysql-dbadminpasswd:
+        file: "test/maria-dbadminpasswd"
+    mysql-dbuserpasswd:
+        file: "test/maria-dbuserpasswd"
+    postgres-dbadminpasswd:
+        file: "./test/postgres-dbadminpasswd"
+
+volumes:
+    nextcloud-db:
+    postgres-db:

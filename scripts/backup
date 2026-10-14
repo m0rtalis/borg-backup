@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+# shellcheck disable=SC1091
+source /container.env
+
+echo "Starting backup"
+rm --recursive --force "${OTHER_DATA}"
+mkdir --parents "${OTHER_DATA}"
+
+for f in /app/prepare/*; do
+	if [[ -x "$f" ]]; then
+		echo "Source $f"
+		# shellcheck disable=SC1090
+		source "$f" "backup"
+	fi
+done
+
+backup-mysql backup
+backup-postgresql backup
+backup-borg backup
+sync-rclone backup

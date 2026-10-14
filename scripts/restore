@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+# shellcheck disable=SC1091
+source /container.env
+
+echo "Starting restore"
+
+read -p "Restore ${BUCKET_NAME}::${BORG_REPO}? (y/n): "
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "Abort!"
+    exit 1
+fi
+
+for f in /app/prepare/*; do
+	if [[ -x "$f" ]]; then
+		echo "Source $f"
+		# shellcheck disable=SC1090
+		source "$f" "restore"
+	fi
+done
+
+# Deactivate sync cause holy shit that's expensive
+# sync-rclone restore
+backup-borg restore
+backup-postgresql restore
+backup-mysql restore
+

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+# shellcheck disable=SC1091
+source /container.env
+
+echo "Starting backup prune"
+
+backup-borg prune
+sync-rclone backup
+

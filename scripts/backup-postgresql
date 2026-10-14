@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+# shellcheck disable=SC1091
+source /container.env
+
+backup() {
+	echo "Backup postgresql server ${POSTGRES_HOST}"
+	export PGPASSWORD="${POSTGRES_PASSWORD}"
+	pg_dumpall \
+		--host="${POSTGRES_HOST}" \
+		--username="${POSTGRES_USER}" \
+		--no-password \
+		--quote-all-identifiers \
+		--clean \
+		--if-exists \
+		> "${OTHER_DATA}/postgres-dump.sql"
+}
+
+restore() {
+	echo "Restore postgresql server ${POSTGRES_HOST}"
+	export PGPASSWORD="${POSTGRES_PASSWORD}"
+	psql \
+		--host="${POSTGRES_HOST}" \
+		--username="${POSTGRES_USER}" \
+		--no-password \
+		--quiet \
+		--file "${OTHER_DATA}/postgres-dump.sql"
+}
+
+if [[ -z "${POSTGRES_HOST}" ]]; then
+	exit 0	
+fi
+
+if [[ $# == 0 || ($# == 1 && $1 == "backup") ]]; then
+	backup
+elif [[ $# == 1 && $1 == "restore" ]]; then
+	restore
+else
+	echo "Operation $* not supported"
+fi

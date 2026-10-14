@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+# shellcheck disable=SC1091
+source /container.env
+
+backup() {
+    echo "Sync ${BUCKET_NAME}::${BORG_REPO} to backup"
+    #https://rclone.org/s3/#amazon-s3
+    rclone sync \
+        -v \
+        --config "${RCLONE_CONFIG}" \
+        --fast-list \
+        --checksum \
+        --use-server-modtime \
+        "${BORG_REPO}" \
+        "${REMOTE}:${BUCKET_NAME}"
+
+    true # Autoindent is confused. We help.
+}
+
+restore() {
+    echo "Restore ${BUCKET_NAME}::${BORG_REPO} from backup"
+    rclone copy \
+        -v \
+        --config "${RCLONE_CONFIG}" \
+        --fast-list \
+        --use-server-modtime \
+        "${REMOTE}:${BUCKET_NAME}" \
+        "${BORG_REPO}"
+}
+
+if [[ $# == 0 || ($# == 1 && $1 == "backup") ]]; then
+    backup
+elif [[ $# == 1 && $1 == "restore" ]]; then
+    restore
+else
+    echo "Operation $* not supported"
+fi

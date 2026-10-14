@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+# shellcheck disable=SC1091
+source /container.env
+
+backup() {
+    echo "Backup borg repo"
+    if ! borg info "${BORG_REPO}" &>/dev/null; then
+        echo "Create new repository"
+
+        borg init \
+            --encryption repokey \
+            --make-parent-dirs \
+            "${BORG_REPO}"
+    fi
+
+    borg create \
+        --verbose \
+        --stats \
+        --exclude-caches \
+        --compression "zlib" \
+        --noxattrs \
+        "${BORG_REPO}::${ARCHIVE}" \
+        "${DATA}" "${OTHER_DATA}"
+
+    true # Autoindent is confused. We help.
+}
+
+restore() {
+    echo "Restore borg repo"
+    if ! borg check --glob-archives "${ARCHIVE_PREFIX}*" --last 1 "${BORG_REPO}"; then
+        echo "Repository or archive is corrupted. Fix before continuing."
+        exit 1
+    fi
+
+    last_archive="$(borg list --glob-archives "${ARCHIVE_PREFIX}*" --last 1 --short)"
+    restore_archive="${RESTORE_ARCHIVE:-${last_archive}}"
+
+    (
+        cd / &&
+            borg extract \
+                --noxattrs \
+                --progress \
+                "${BORG_REPO}::${restore_archive}"
+    )
+}
+
+prune() {
+    echo "Prune borg repo"
+    borg prune \
+        --stats \
+        --list \
+        --glob-archives "${ARCHIVE_PREFIX}*" \
+        --keep-within 5H \
+        --keep-last 3 \
+        --keep-daily 5 \
+        --keep-weekly 4 \
+        --keep-monthly 3 \
+        --keep-yearly 2 \
+        "${BORG_REPO}"
+    borg compact "${BORG_REPO}"
+}
+
+check() {
+    echo "Check borg archive"
+    if ! borg check "${BORG_REPO}"; then
+        echo "ERROR: Borg repository corrupted"
+        return 1
+    fi
+}
+
+if [[ $# == 0 || ($# == 1 && $1 == "backup") ]]; then
+    backup
+elif [[ $# == 1 && $1 == "restore" ]]; then
+    restore
+elif [[ $# == 1 && $1 == "prune" ]]; then
+    prune
+elif [[ $# == 1 && $1 == "check" ]]; then
+    check
+else
+    echo "Operation $* not supported"
+fi
