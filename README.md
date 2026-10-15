@@ -94,7 +94,7 @@ A database is only backed up if its `*_HOST` is set.
 | `POSTGRES_USER` (*file*) | `postgres` | |
 | `POSTGRES_PASSWORD` (*file*) | | |
 
-PostgreSQL uses `pg_dumpall` (all databases); MySQL dumps only `MYSQL_DATABASE`. Clients are MariaDB 10.11 and PostgreSQL 15.
+PostgreSQL uses `pg_dumpall` (all databases); MySQL dumps only `MYSQL_DATABASE`. Clients are MariaDB (`MARIADB_VERSION` in the `Dockerfile`) and PostgreSQL 15.
 
 ### Borg
 
@@ -137,8 +137,13 @@ docker exec -it <container> restore
 Requires [just](https://github.com/casey/just).
 
 ```sh
-just build   # docker build
-just push    # build + push
+just build           # docker build
+just verify          # build + backup/prune/check/restore against throwaway MariaDB containers
+just release 1.2.0   # verify, push 1.2.0, 1.2, 1 and latest, tag v1.2.0
 ```
+
+`just verify` is self-contained (Docker only). It covers files only, MariaDB, MariaDB with a `prepare` hook and a custom `MYSQL_PORT`, with rclone writing to a local remote instead of S3. Its sample env file and hook are in `test/config`.
+
+Versions are SemVer for the image interface (env vars, volumes, scripts, behavior): major for breaking changes, minor for features and tool upgrades, patch for fixes. The version is in the `org.opencontainers.image.version` label. Pin consumers to a minor tag such as `1.2`, not `latest`.
 
 Borg and rclone are downloaded with signature checks; bump `BORG_VERSION` / `RCLONE_VERSION` in the `Dockerfile` to upgrade. Image is `linux/amd64` only.

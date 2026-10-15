@@ -8,6 +8,9 @@ ARG BORG_GPG="9F88FB52FAF7B393"
 ARG RCLONE_VERSION="v1.72.1"
 ARG RCLONE_GPG="FBF737ECE9F8AB18604BD2AC93935E02FF3B54FA"
 
+# https://mariadb.com/docs/server/server-management/install-and-upgrade-mariadb/installing-mariadb/binary-packages/gpg#mariadb-community-server-debian-ubuntu-key
+ARG MARIADB_GPG="177F4010FE56CA3336300305F1656F24C74CD1D8"
+
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -qq \
@@ -32,9 +35,13 @@ RUN wget -q -O "rclone-${RCLONE_VERSION}-linux-amd64.zip" "https://downloads.rcl
     && cp rclone /rclone \
     && chmod 755 /rclone
 
+# Prepare mariadb repo
+RUN wget -q -O /mariadb.asc "https://supplychain.mariadb.com/MariaDB-Server-GPG-KEY" \
+    && test "$(gpg --show-keys --with-colons /mariadb.asc | awk -F: '/^pub/ {n++} /^fpr/ && !f {f=$10} END {print n ":" f}')" = "1:${MARIADB_GPG}"
+
 # Prepare postgres repo
 RUN wget -q -O /pgdg.asc "https://www.postgresql.org/media/keys/ACCC4CF8.asc" \
-    && echo "deb http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /pgdg.list
+    && echo "deb [signed-by=/usr/share/keyrings/pgdg.asc] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /pgdg.list
 
 FROM debian:bookworm
 LABEL "maintainer"="Fabian Eisinger"
@@ -42,10 +49,12 @@ LABEL "maintainer"="Fabian Eisinger"
 ENV LANG=C.UTF-8 \
     DEBIAN_FRONTEND=noninteractive
 
-COPY --from=builder /pgdg.asc /etc/apt/trusted.gpg.d/
-COPY --from=builder /pgdg.list /etc/apt/sources.list.d/
+# MariaDB client series, https://mariadb.org/mariadb/all-releases/
+ARG MARIADB_VERSION="12.3"
 
-COPY --chmod=+x mariadb_repo_setup /tmp/mariadb_repo_setup
+# signed-by instead of trusted.gpg.d: a key there is trusted for every repository
+COPY --from=builder /pgdg.asc /mariadb.asc /usr/share/keyrings/
+COPY --from=builder /pgdg.list /etc/apt/sources.list.d/
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends -qq \
@@ -54,13 +63,13 @@ RUN apt-get update \
 	   tzdata \
 	   curl \
     && update-ca-certificates \
-    && ./tmp/mariadb_repo_setup --mariadb_server_version="10.11" --include-tools --skip-maxscale \
+    && echo "deb [signed-by=/usr/share/keyrings/mariadb.asc] https://dlm.mariadb.com/repo/mariadb-server/${MARIADB_VERSION}/repo/debian bookworm main" > /etc/apt/sources.list.d/mariadb.list \
     && apt-get update -qq \
     && apt-get install -y --no-install-recommends -qq \
-	   mariadb-client=1:10.11* \
-       mariadb-client-core=1:10.11* \
-       mariadb-common=1:10.11* \
-       libmariadb3=1:10.11* \
+	   mariadb-client=1:${MARIADB_VERSION}.* \
+       mariadb-client-core=1:${MARIADB_VERSION}.* \
+       mariadb-common=1:${MARIADB_VERSION}.* \
+       libmariadb3=1:${MARIADB_VERSION}.* \
 	   postgresql-client-15 \
 	&& rm -rf /var/lib/apt/lists/*
 
@@ -76,3 +85,7 @@ VOLUME [ "/data", "/repo", "/app" ]
 
 CMD ["cron", "-f"]
 ENTRYPOINT ["/entrypoint.sh"]
+
+# Last, so a new version does not invalidate the cache of the layers above
+ARG VERSION="dev"
+LABEL "org.opencontainers.image.version"="${VERSION}"

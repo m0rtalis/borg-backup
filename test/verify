@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# Verifies backup, prune, check and restore of an image for four setups: files only, MariaDB,
+# MariaDB with a prepare hook, MariaDB on a custom port. Usage: verify IMAGE
+# Deviation from production: rclone uses a local-backend remote instead of AWS S3.
+set -uo pipefail
+
+IMAGE="${1:?usage: verify IMAGE}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CONFIG="${HERE}/config"
+NET=vb-net
+DOMAIN=example.org
+DB_IMAGE="mariadb:$(sed -n 's/^ARG MARIADB_VERSION="\(.*\)"/\1/p' "${HERE}/../Dockerfile")"
+
+W="$(mktemp -d)"
+
+remove_docker() {
+	docker ps -aq --filter label=vb-verify | xargs -r docker rm -f >/dev/null 2>&1
+	docker network rm "${NET}" >/dev/null 2>&1
+	docker volume ls -q --filter label=vb-verify | xargs -r docker volume rm >/dev/null 2>&1
+}
+
+cleanup() {
+	# Containers write as root, so the host user cannot remove the files
+	docker run --rm -v "${W}:/w" --entrypoint sh "${IMAGE}" -c 'rm -rf /w/* /w/.[!.]*' >/dev/null 2>&1
+	rmdir "${W}" 2>/dev/null
+	remove_docker
+}
+
+# A killed earlier run leaves its containers behind, which would clash on the names
+remove_docker
+trap cleanup EXIT
+mkdir -p "${W}"/{sec,remote}
+
+fail=0
+check() {
+	local name="$1"
+	shift
+	if "$@" >"${W}/last.out" 2>&1; then
+		echo "  PASS ${name}"
+		return
+	fi
+	echo "  FAIL ${name}"
+	sed 's/^/       | /' "${W}/last.out" | tail -15
+	fail=1
+}
+
+wait_for() {
+	local tries="$1"
+	shift
+	for _ in $(seq "${tries}"); do
+		if "$@" >/dev/null 2>&1; then
+			return 0
+		fi
+		sleep 1
+	done
+	return 1
+}
+
+for s in borg-repokey s3-keyid s3-passwd dbpw; do
+	echo "pw-${s}-${RANDOM}" > "${W}/sec/${s}"
+done
+chmod 644 "${W}"/sec/*
+printf '[s3]\ntype = local\n' > "${W}/rclone.conf"
+# Every DB usage mounts this one file as its root password, since one server (or one password) serves them all
+DBPW="$(cat "${W}/sec/dbpw")"
+
+db() {
+	local c="$1"
+	shift
+	docker exec "${c}" mariadb -uroot -p"${DBPW}" "$@"
+}
+
+# Args: container, table, expected value
+db_has() {
+	db "$1" -N -e "SELECT v FROM $2" | grep -q "$3"
+}
+
+# Args: container, port. TCP, because the temporary init server only listens on the socket
+wait_db() {
+	wait_for 120 db "$1" -h127.0.0.1 -P"$2" -e 'SELECT 1' || { echo "$1 did not start"; exit 1; }
+}
+
+# Args: container, database, value
+seed() {
+	db "$1" -e "CREATE DATABASE $2; CREATE TABLE $2.t (v VARCHAR(40)); INSERT INTO $2.t VALUES ('$3');" \
+		|| { echo "Seeding $2 failed"; exit 1; }
+}
+
+# Args: container, network alias, extra server args
+start_db() {
+	local name="$1" alias="$2"
+	shift 2
+	docker run -d --label vb-verify --name "${name}" --network "${NET}" --network-alias "${alias}" \
+		-e MARIADB_ROOT_PASSWORD="${DBPW}" "${DB_IMAGE}" "$@" >/dev/null
+}
+
+run_usage() {
+	local name="$1"
+	shift
+	local c="vb-${name}" d="${W}/${name}"
+	mkdir -p "${d}/data" "${d}/repo"
+	echo "${name}-data" > "${d}/data/file.txt"
+	docker volume create --label vb-verify "vb-app-${name}" >/dev/null
+	echo "== ${name}"
+	docker run -d --label vb-verify --name "${c}" --network "${NET}" --init \
+		--env-file "${CONFIG}/backup.env" \
+		-e RCLONE_CONFIG=/rclone-test/rclone.conf \
+		-v "${d}/data:/data" -v "${d}/repo:/repo" -v "vb-app-${name}:/app" \
+		-v "${W}/rclone.conf:/rclone-test/rclone.conf:ro" -v "${W}/remote:/remote" \
+		-v "${W}/sec/borg-repokey:/run/secrets/borg-repokey:ro" \
+		-v "${W}/sec/s3-keyid:/run/secrets/s3-keyid:ro" \
+		-v "${W}/sec/s3-passwd:/run/secrets/s3-passwd:ro" \
+		"$@" "${IMAGE}" >/dev/null || { echo "  FAIL start"; fail=1; return; }
+	# The entrypoint writes the cron file last, after /container.env
+	check "${name}: cron job file" wait_for 30 docker exec "${c}" grep -q "root backup" /etc/cron.d/start
+}
+
+# Args: usage name, bucket directory, extra paths the archive must hold besides data/file.txt
+inspect_backup() {
+	local name="$1" bucket="$2"
+	shift 2
+	check "${name}: backup" docker exec "vb-${name}" backup
+	check "${name}: archive contents" docker exec "vb-${name}" bash -c '
+		source /container.env
+		archive="$(borg list --glob-archives "${ARCHIVE_PREFIX}*" --last 1 --short "$BORG_REPO")"
+		paths="$(borg list --format "{path}{NL}" "$BORG_REPO::$archive")"
+		for p in "$@"; do
+			grep -q "$p" <<<"$paths" || { echo "missing $p in $archive"; exit 1; }
+		done' _ data/file.txt "$@"
+	check "${name}: repo mirrored to remote" test -f "${W}/remote/${DOMAIN}/${bucket}/config"
+	check "${name}: prune" docker exec "vb-${name}" prune
+	check "${name}: check" docker exec "vb-${name}" check
+}
+
+# The backup leaves /other_data in the container; without removing it a restore could load that stale dump instead of the archive's
+restore_usage() {
+	docker exec "vb-$1" rm -rf /other_data
+	check "$1: restore" bash -c "printf 'y\n' | docker exec -i vb-$1 restore"
+}
+
+docker network create "${NET}" >/dev/null
+start_db vb-db database
+start_db vb-dbport dbport --port=3307
+# Stand-in for Nextcloud in maintenance mode (the hook accepts 404/503 without prompting)
+docker run -d --label vb-verify --name vb-nc --network "${NET}" --network-alias nextcloud python:3-alpine python -c "
+import http.server as h
+class H(h.BaseHTTPRequestHandler):
+    def do_HEAD(s): s.send_response(503); s.end_headers()
+    do_GET = do_HEAD
+h.HTTPServer(('',80),H).serve_forever()" >/dev/null
+
+run_usage files \
+	-e "ARCHIVE_PREFIX=files_${DOMAIN}_" -e "BUCKET_NAME=/remote/${DOMAIN}/files"
+inspect_backup files files
+rm "${W}/files/data/file.txt"
+restore_usage files
+check "files: file restored" grep -q files-data "${W}/files/data/file.txt"
+
+wait_db vb-db 3306
+seed vb-db appdb app-row
+seed vb-db hookdb hook-row
+
+run_usage mysql \
+	-v "${W}/sec/dbpw:/run/secrets/dbpw:ro" \
+	-e "ARCHIVE_PREFIX=mysql_${DOMAIN}_" -e "BUCKET_NAME=/remote/${DOMAIN}/mysql" \
+	-e MYSQL_HOST=database -e MYSQL_DATABASE=appdb \
+	-e MYSQL_ROOT_PASSWORD_FILE=/run/secrets/dbpw
+inspect_backup mysql mysql other_data/mysql-dump.sql
+rm "${W}/mysql/data/file.txt"
+db vb-db -e "DROP DATABASE appdb"
+restore_usage mysql
+check "mysql: file restored" grep -q mysql-data "${W}/mysql/data/file.txt"
+check "mysql: DB restored" db_has vb-db appdb.t app-row
+
+run_usage hook \
+	-v "${W}/sec/dbpw:/run/secrets/dbpw:ro" \
+	-v "${CONFIG}/prepare:/app/prepare:ro" \
+	-e "ARCHIVE_PREFIX=hook_${DOMAIN}_" -e "BUCKET_NAME=/remote/${DOMAIN}/hook" \
+	-e MYSQL_HOST=database -e MYSQL_DATABASE=hookdb \
+	-e MYSQL_ROOT_PASSWORD_FILE=/run/secrets/dbpw \
+	-e NEXTCLOUD_HOST=nextcloud
+inspect_backup hook hook other_data/mysql-dump.sql
+rm "${W}/hook/data/file.txt"
+db vb-db -e "DROP DATABASE hookdb"
+wait_for 30 docker exec vb-hook curl -sI -o /dev/null http://nextcloud
+restore_usage hook
+check "hook: file restored" grep -q hook-data "${W}/hook/data/file.txt"
+check "hook: DB restored" db_has vb-db hookdb.t hook-row
+
+wait_db vb-dbport 3307
+seed vb-dbport portdb port-row
+run_usage port \
+	-v "${W}/sec/dbpw:/run/secrets/dbpw:ro" \
+	-e "ARCHIVE_PREFIX=port_${DOMAIN}_" -e "BUCKET_NAME=/remote/${DOMAIN}/port" \
+	-e MYSQL_HOST=dbport -e MYSQL_PORT=3307 -e MYSQL_DATABASE=portdb \
+	-e MYSQL_ROOT_PASSWORD_FILE=/run/secrets/dbpw
+inspect_backup port port other_data/mysql-dump.sql
+db vb-dbport -e "DROP DATABASE portdb"
+restore_usage port
+check "port: DB restored" db_has vb-dbport portdb.t port-row
+
+echo
+if ((fail)); then
+	echo "RESULT: FAILURES"
+else
+	echo "RESULT: all passed"
+fi
+exit "${fail}"

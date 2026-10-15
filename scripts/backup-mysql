@@ -7,11 +7,13 @@ set -o pipefail
 # shellcheck disable=SC1091
 source /container.env
 
+# Port via env, not --port: an explicit --port makes the 12.x clients warn that --ssl-verify-server-cert is disabled
+export MYSQL_TCP_PORT="${MYSQL_PORT}"
+
 backup() {
 	echo "Backup mysql server ${MYSQL_HOST}"
-	MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysqldump \
+	MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mariadb-dump \
 		--host="${MYSQL_HOST}" \
-		--port="${MYSQL_PORT}" \
 		--user="root" \
 		--skip-lock-tables \
 		--add-drop-database \
@@ -23,9 +25,8 @@ backup() {
 
 restore() {
 	echo "Restore mysql server ${MYSQL_HOST}"
-	MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql \
+	MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mariadb \
 		--host="${MYSQL_HOST}" \
-		--port="${MYSQL_PORT}" \
 		--user="root" \
 		< "${OTHER_DATA}/mysql-dump.sql"
 }
