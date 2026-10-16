@@ -67,6 +67,8 @@ Variables marked *file* also accept a `<NAME>_FILE` variant (Docker secrets). Se
 | `ARCHIVE_PREFIX` | empty | Prefix for archive names. Prune and restore only touch archives with this prefix. |
 | `ARCHIVE_BASENAME` | `{now:%Y-%m-%dT%H:%M:%S}` | Borg archive name template |
 | `RESTORE_ARCHIVE` | latest | Archive to restore (full name incl. prefix) |
+| `EXCLUDE` | empty | Space separated Borg patterns, each passed as `--exclude`, e.g. `pf:/data/mail sh:/data/**/*.tmp`. Patterns cannot contain spaces. |
+| `EXCLUDE_IF_PRESENT` | empty | Space separated file names, each passed as `--exclude-if-present`. Directories containing one are skipped. |
 
 ### S3 / rclone
 

@@ -18,10 +18,23 @@ backup() {
             "${BORG_REPO}"
     fi
 
+    # Whitespace separated, so patterns cannot contain spaces
+    local -a patterns present excludes=()
+    local item
+    read -ra patterns <<<"${EXCLUDE}"
+    read -ra present <<<"${EXCLUDE_IF_PRESENT}"
+    for item in "${patterns[@]}"; do
+        excludes+=(--exclude "${item}")
+    done
+    for item in "${present[@]}"; do
+        excludes+=(--exclude-if-present "${item}")
+    done
+
     borg create \
         --verbose \
         --stats \
         --exclude-caches \
+        "${excludes[@]}" \
         --compression "zlib" \
         --noxattrs \
         "${BORG_REPO}::${ARCHIVE}" \

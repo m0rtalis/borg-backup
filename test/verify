@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Verifies backup, prune, check and restore of an image for four setups: files only, MariaDB,
-# MariaDB with a prepare hook, MariaDB on a custom port. Usage: verify IMAGE
+# MariaDB with a prepare hook, MariaDB on a custom port, plus EXCLUDE and EXCLUDE_IF_PRESENT. Usage: verify IMAGE
 # Deviation from production: rclone uses a local-backend remote instead of AWS S3.
 set -uo pipefail
 
@@ -100,11 +100,16 @@ run_usage() {
 	local c="vb-${name}" d="${W}/${name}"
 	mkdir -p "${d}/data" "${d}/repo"
 	echo "${name}-data" > "${d}/data/file.txt"
+	mkdir -p "${d}/data/skip" "${d}/data/marked"
+	echo skip > "${d}/data/skip/a.txt"
+	echo marked > "${d}/data/marked/b.txt"
+	touch "${d}/data/marked/.skip-marker"
 	docker volume create --label vb-verify "vb-app-${name}" >/dev/null
 	echo "== ${name}"
 	docker run -d --label vb-verify --name "${c}" --network "${NET}" --init \
 		--env-file "${CONFIG}/backup.env" \
 		-e RCLONE_CONFIG=/rclone-test/rclone.conf \
+		-e "EXCLUDE=pf:/data/skip" -e "EXCLUDE_IF_PRESENT=.skip-marker" \
 		-v "${d}/data:/data" -v "${d}/repo:/repo" -v "vb-app-${name}:/app" \
 		-v "${W}/rclone.conf:/rclone-test/rclone.conf:ro" -v "${W}/remote:/remote" \
 		-v "${W}/sec/borg-repokey:/run/secrets/borg-repokey:ro" \
@@ -127,6 +132,15 @@ inspect_backup() {
 		for p in "$@"; do
 			grep -q "$p" <<<"$paths" || { echo "missing $p in $archive"; exit 1; }
 		done' _ data/file.txt "$@"
+	check "${name}: exclusions honored" docker exec "vb-${name}" bash -c '
+		source /container.env
+		archive="$(borg list --glob-archives "${ARCHIVE_PREFIX}*" --last 1 --short "$BORG_REPO")"
+		paths="$(borg list --format "{path}{NL}" "$BORG_REPO::$archive")"
+		if grep -qE "data/(skip|marked)/" <<<"$paths"; then
+			echo "excluded paths in $archive:"
+			grep -E "data/(skip|marked)/" <<<"$paths"
+			exit 1
+		fi'
 	check "${name}: repo mirrored to remote" test -f "${W}/remote/${DOMAIN}/${bucket}/config"
 	check "${name}: prune" docker exec "vb-${name}" prune
 	check "${name}: check" docker exec "vb-${name}" check

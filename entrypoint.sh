@@ -54,6 +54,8 @@ docker_setup_borg_env() {
 	var_env 'ARCHIVE_BASENAME' "{now:%Y-%m-%dT%H:%M:%S}"
 	export 'ARCHIVE'="${ARCHIVE_PREFIX}${ARCHIVE_BASENAME}"
 	var_env 'RESTORE_ARCHIVE'
+	var_env 'EXCLUDE'
+	var_env 'EXCLUDE_IF_PRESENT'
 
 	export 'BORG_REPO'="/repo"
 	export 'DATA'="/data"
