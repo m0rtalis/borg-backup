@@ -16,6 +16,8 @@ Retention: everything within 5 hours, last 3, 5 daily, 4 weekly, 3 monthly, 2 ye
 
 `rclone sync` makes the bucket equal to the local repo, so the sync refuses to run when the repo in `/repo` has a different ID than the one in the bucket (e.g. an empty `/repo` mount that was initialised from scratch). Empty the bucket first if the repo was replaced on purpose. Borg warnings (exit code 1, e.g. a file changed while it was read) are logged and do not skip the sync; errors do.
 
+Borg stores and restores numeric uid/gid (`--numeric-ids`), so files come back with the owner they had when they were backed up, independent of the users in this container. Set `RESTORE_UID` and/or `RESTORE_GID` to restore everything under a different owner.
+
 The Borg repo is created on first backup (`repokey` encryption, zlib compression). Cron output goes to the container log.
 
 ## Volumes
@@ -69,6 +71,8 @@ Variables marked *file* also accept a `<NAME>_FILE` variant (Docker secrets). Se
 | `ARCHIVE_PREFIX` | empty | Prefix for archive names. Prune and restore only touch archives with this prefix. |
 | `ARCHIVE_BASENAME` | `{now:%Y-%m-%dT%H:%M:%S}` | Borg archive name template |
 | `RESTORE_ARCHIVE` | latest | Archive to restore (full name incl. prefix) |
+| `RESTORE_UID` | empty | Owner of the restored files. Default: the uid stored in the archive. |
+| `RESTORE_GID` | empty | Group of the restored files. Default: the gid stored in the archive. |
 | `EXCLUDE` | empty | Space separated Borg patterns, each passed as `--exclude`, e.g. `pf:/data/mail sh:/data/**/*.tmp`. Patterns cannot contain spaces. |
 | `EXCLUDE_IF_PRESENT` | empty | Space separated file names, each passed as `--exclude-if-present`. Directories containing one are skipped. |
 

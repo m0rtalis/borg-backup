@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Verifies backup, prune, check and restore of an image for four setups: files only, MariaDB,
 # MariaDB with a prepare hook, MariaDB on a custom port, plus EXCLUDE and EXCLUDE_IF_PRESENT,
-# upload after borg warnings and the guard against a replaced repo. Usage: verify IMAGE
+# upload after borg warnings, the guard against a replaced repo, numeric owners and RESTORE_UID/GID. Usage: verify IMAGE
 # Deviation from production: rclone uses a local-backend remote instead of AWS S3.
 set -uo pipefail
 
@@ -166,6 +166,8 @@ h.HTTPServer(('',80),H).serve_forever()" >/dev/null
 
 run_usage files \
 	-e "ARCHIVE_PREFIX=files_${DOMAIN}_" -e "BUCKET_NAME=/remote/${DOMAIN}/files"
+# The user gets another uid before the restore: without --numeric-ids Borg would restore by name
+docker exec vb-files bash -c 'useradd -u 5000 ghost && echo ghost > /data/owned.txt && chown ghost:ghost /data/owned.txt'
 inspect_backup files files
 
 # Borg exits 1 on warnings. The wrapper makes borg create do so after it wrote the archive
@@ -186,9 +188,10 @@ WRAPPER
 check "files: warnings still sync" warning_sync
 docker exec vb-files rm /usr/local/bin/borg
 
-rm "${W}/files/data/file.txt"
+docker exec vb-files bash -c 'rm /data/file.txt /data/owned.txt && groupmod -g 6000 ghost && usermod -u 6000 ghost'
 restore_usage files
 check "files: file restored" grep -q files-data "${W}/files/data/file.txt"
+check "files: numeric owner restored" test "$(docker exec vb-files stat -c %u:%g /data/owned.txt)" = 5000:5000
 
 # A replaced repo must not overwrite the one in the bucket
 replaced_repo_blocked() {
@@ -238,11 +241,14 @@ run_usage port \
 	-v "${W}/sec/dbpw:/run/secrets/dbpw:ro" \
 	-e "ARCHIVE_PREFIX=port_${DOMAIN}_" -e "BUCKET_NAME=/remote/${DOMAIN}/port" \
 	-e MYSQL_HOST=dbport -e MYSQL_PORT=3307 -e MYSQL_DATABASE=portdb \
-	-e MYSQL_ROOT_PASSWORD_FILE=/run/secrets/dbpw
+	-e MYSQL_ROOT_PASSWORD_FILE=/run/secrets/dbpw \
+	-e RESTORE_UID=7000 -e RESTORE_GID=7001
 inspect_backup port port other_data/mysql-dump.sql
 db vb-dbport -e "DROP DATABASE portdb"
+rm "${W}/port/data/file.txt"
 restore_usage port
 check "port: DB restored" db_has vb-dbport portdb.t port-row
+check "port: RESTORE_UID and RESTORE_GID applied" test "$(docker exec vb-port stat -c %u:%g /data/file.txt /data)" = $'7000:7001\n7000:7001'
 
 echo
 if ((fail)); then

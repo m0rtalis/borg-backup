@@ -40,6 +40,7 @@ backup() {
         "${excludes[@]}" \
         --compression "zlib" \
         --noxattrs \
+        --numeric-ids \
         "${BORG_REPO}::${ARCHIVE}" \
         "${DATA}" "${OTHER_DATA}" || rc=$?
     if ((rc > 1)); then
@@ -64,8 +65,19 @@ restore() {
         cd / &&
             borg extract \
                 --noxattrs \
+                --numeric-ids \
                 --progress \
                 "${BORG_REPO}::${restore_archive}"
+    )
+
+    if [[ -z "${RESTORE_UID}${RESTORE_GID}" ]]; then
+        return
+    fi
+    # Only the paths of the archive, so files that were not restored keep their owner
+    (
+        cd / &&
+            borg list --format "{path}{NUL}" "${BORG_REPO}::${restore_archive}" |
+            xargs --null --no-run-if-empty chown --no-dereference "${RESTORE_UID}${RESTORE_GID:+:${RESTORE_GID}}" --
     )
 }
 

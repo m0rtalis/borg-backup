@@ -54,6 +54,12 @@ docker_setup_borg_env() {
 	var_env 'ARCHIVE_BASENAME' "{now:%Y-%m-%dT%H:%M:%S}"
 	export 'ARCHIVE'="${ARCHIVE_PREFIX}${ARCHIVE_BASENAME}"
 	var_env 'RESTORE_ARCHIVE'
+	var_env 'RESTORE_UID'
+	var_env 'RESTORE_GID'
+	if [[ ! "${RESTORE_UID}" =~ ^[0-9]*$ || ! "${RESTORE_GID}" =~ ^[0-9]*$ ]]; then
+		echo "RESTORE_UID and RESTORE_GID must be numeric"
+		exit 1
+	fi
 	var_env 'EXCLUDE'
 	var_env 'EXCLUDE_IF_PRESENT'
 
