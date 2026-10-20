@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Verifies backup, prune, check and restore of an image for four setups: files only, MariaDB,
-# MariaDB with a prepare hook, MariaDB on a custom port, plus EXCLUDE and EXCLUDE_IF_PRESENT. Usage: verify IMAGE
+# MariaDB with a prepare hook, MariaDB on a custom port, plus EXCLUDE and EXCLUDE_IF_PRESENT,
+# upload after borg warnings and the guard against a replaced repo. Usage: verify IMAGE
 # Deviation from production: rclone uses a local-backend remote instead of AWS S3.
 set -uo pipefail
 
@@ -166,9 +167,39 @@ h.HTTPServer(('',80),H).serve_forever()" >/dev/null
 run_usage files \
 	-e "ARCHIVE_PREFIX=files_${DOMAIN}_" -e "BUCKET_NAME=/remote/${DOMAIN}/files"
 inspect_backup files files
+
+# Borg exits 1 on warnings. The wrapper makes borg create do so after it wrote the archive
+warning_sync() {
+	local out
+	docker exec -i vb-files sh -c 'cat > /usr/local/bin/borg && chmod +x /usr/local/bin/borg' <<'WRAPPER'
+#!/bin/sh
+/usr/bin/borg "$@"
+rc=$?
+[ "$1" = create ] && [ "$rc" = 0 ] && exit 1
+exit "$rc"
+WRAPPER
+	echo "files-more" > "${W}/files/data/more.txt"
+	out="$(docker exec vb-files backup 2>&1)" || { echo "${out}"; return 1; }
+	grep -q "finished with warnings" <<<"${out}" || { echo "${out}"; return 1; }
+	docker exec vb-files diff -r /repo "/remote/${DOMAIN}/files"
+}
+check "files: warnings still sync" warning_sync
+docker exec vb-files rm /usr/local/bin/borg
+
 rm "${W}/files/data/file.txt"
 restore_usage files
 check "files: file restored" grep -q files-data "${W}/files/data/file.txt"
+
+# A replaced repo must not overwrite the one in the bucket
+replaced_repo_blocked() {
+	docker exec vb-files bash -c 'rm -rf /repo/* /repo/.[!.]*'
+	if docker exec vb-files backup; then
+		echo "backup into an emptied repo succeeded"
+		return 1
+	fi
+	test -f "${W}/remote/${DOMAIN}/files/config"
+}
+check "files: replaced repo does not overwrite the bucket" replaced_repo_blocked
 
 wait_db vb-db 3306
 seed vb-db appdb app-row

@@ -7,7 +7,29 @@ set -o pipefail
 # shellcheck disable=SC1091
 source /container.env
 
+# `rclone sync` makes the bucket equal to the repo. A repo that was created from scratch,
+# e.g. because the /repo mount is empty, has a new ID and would delete the old repo from
+# the bucket. The ID is in the `config` file of the repo.
+check_same_repo() {
+    local remote="${REMOTE}:${BUCKET_NAME}" local_id remote_id
+    if [[ ! -f "${BORG_REPO}/config" ]]; then
+        echo "ERROR: ${BORG_REPO} holds no Borg repository, not syncing"
+        return 1
+    fi
+    if [[ -z "$(rclone lsf --config "${RCLONE_CONFIG}" --max-depth 1 --files-only --include "/config" "${remote}")" ]]; then
+        return 0
+    fi
+    local_id="$(sed -n 's/^id = //p' "${BORG_REPO}/config")"
+    remote_id="$(rclone cat --config "${RCLONE_CONFIG}" "${remote}/config" | sed -n 's/^id = //p')"
+    if [[ -z "${local_id}" || "${local_id}" != "${remote_id}" ]]; then
+        echo "ERROR: ${BORG_REPO} is a different repository than ${remote}, not syncing."
+        echo "Empty the bucket first if the repository was replaced on purpose."
+        return 1
+    fi
+}
+
 backup() {
+    check_same_repo
     echo "Sync ${BUCKET_NAME}::${BORG_REPO} to backup"
     #https://rclone.org/s3/#amazon-s3
     rclone sync \

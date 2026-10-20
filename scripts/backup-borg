@@ -30,6 +30,9 @@ backup() {
         excludes+=(--exclude-if-present "${item}")
     done
 
+    # Exit code 1 means warnings, e.g. a file changed while it was read. The archive
+    # exists then, so the upload must go on. Anything above 1 is an error.
+    local rc=0
     borg create \
         --verbose \
         --stats \
@@ -38,9 +41,13 @@ backup() {
         --compression "zlib" \
         --noxattrs \
         "${BORG_REPO}::${ARCHIVE}" \
-        "${DATA}" "${OTHER_DATA}"
-
-    true # Autoindent is confused. We help.
+        "${DATA}" "${OTHER_DATA}" || rc=$?
+    if ((rc > 1)); then
+        return "${rc}"
+    fi
+    if ((rc == 1)); then
+        echo "Warning: borg create finished with warnings"
+    fi
 }
 
 restore() {

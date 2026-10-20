@@ -14,6 +14,8 @@ Image: `teharez/borg-backup:latest`
 
 Retention: everything within 5 hours, last 3, 5 daily, 4 weekly, 3 monthly, 2 yearly.
 
+`rclone sync` makes the bucket equal to the local repo, so the sync refuses to run when the repo in `/repo` has a different ID than the one in the bucket (e.g. an empty `/repo` mount that was initialised from scratch). Empty the bucket first if the repo was replaced on purpose. Borg warnings (exit code 1, e.g. a file changed while it was read) are logged and do not skip the sync; errors do.
+
 The Borg repo is created on first backup (`repokey` encryption, zlib compression). Cron output goes to the container log.
 
 ## Volumes
