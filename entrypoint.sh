@@ -114,6 +114,22 @@ docker_setup_mysql_env() {
 	var_env 'MYSQL_DATABASE'
 }
 
+docker_setup_sqlite_env() {
+	# Do not set default value for SQLITE_FILES.
+	# We use it to determine if a backup should be made.
+	var_env 'SQLITE_FILES'
+	local -a files
+	local file
+	read -ra files <<<"${SQLITE_FILES}"
+	for file in "${files[@]}"; do
+		# The path is embedded in a quoted .backup argument
+		if [[ "${file}" != /* || "${file}" == *"'"* ]]; then
+			echo "SQLITE_FILES entries must be absolute paths without single quotes: '${file}'"
+			exit 1
+		fi
+	done
+}
+
 docker_setup_postgres_env() {
 	# Do not set default value for POSTGRES_HOST.
 	# We use it to determine if a backup should be made.
@@ -164,6 +180,7 @@ main() {
 	docker_setup_rclone_env
 	docker_setup_mysql_env
 	docker_setup_postgres_env
+	docker_setup_sqlite_env
 	create_cronjob
 
 	exec "$@"

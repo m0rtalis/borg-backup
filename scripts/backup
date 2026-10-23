@@ -21,5 +21,6 @@ done
 
 backup-mysql backup
 backup-postgresql backup
+backup-sqlite backup
 backup-borg backup
 sync-rclone backup

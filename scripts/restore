@@ -26,6 +26,7 @@ done
 # Deactivate sync cause holy shit that's expensive
 # sync-rclone restore
 backup-borg restore
+backup-sqlite restore
 backup-postgresql restore
 backup-mysql restore
 

@@ -62,6 +62,7 @@ RUN apt-get update \
 	   cron \
 	   tzdata \
 	   curl \
+	   sqlite3 \
     && update-ca-certificates \
     && echo "deb [signed-by=/usr/share/keyrings/mariadb.asc] https://dlm.mariadb.com/repo/mariadb-server/${MARIADB_VERSION}/repo/debian bookworm main" > /etc/apt/sources.list.d/mariadb.list \
     && apt-get update -qq \

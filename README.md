@@ -24,11 +24,11 @@ The Borg repo is created on first backup (`repokey` encryption, zlib compression
 
 | Path | Purpose |
 | --- | --- |
-| `/data` | Data to back up (mount read-only if you like) |
+| `/data` | Data to back up (mount read-only if you like, unless it holds a database listed in `SQLITE_FILES`) |
 | `/repo` | Borg repository. Persist it. |
 | `/app` | Borg cache/config (`/app/cache/borg`, `/app/config/borg`) and optional hooks (`/app/prepare`). Persist it. |
 
-Database dumps are written to `/other_data` and archived together with `/data`. `/other_data` is wiped on every backup.
+Database dumps and SQLite copies are written to `/other_data` and archived together with `/data`. `/other_data` is wiped on every backup.
 
 ## Quick start
 
@@ -53,6 +53,8 @@ services:
       - borg-app:/app
     secrets: [borg_passphrase, aws_key_id, aws_secret, pg_password, mysql_root_password]
 ```
+
+> **SQLite:** `SQLITE_FILES` databases need `/data` mounted read-write (drop the `:ro`).
 
 > **Borg passphrase:** one of `BORG_PASSPHRASE`, `BORG_PASSPHRASE_FILE` (exclusive) or `BORG_PASSCOMMAND` is required; the container refuses to start without one.
 
@@ -89,7 +91,7 @@ To use another region or provider, mount your own config and point `RCLONE_CONFI
 
 ### Databases
 
-A database is only backed up if its `*_HOST` is set.
+A database is only backed up if its `*_HOST` (or, for SQLite, `SQLITE_FILES`) is set.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -101,8 +103,15 @@ A database is only backed up if its `*_HOST` is set.
 | `POSTGRES_PORT` | `5432` | Same fallback as `MYSQL_PORT` |
 | `POSTGRES_USER` (*file*) | `postgres` | |
 | `POSTGRES_PASSWORD` (*file*) | | |
+| `SQLITE_FILES` | | Space separated absolute paths of SQLite databases, e.g. `/data/app.db /data/mail/main.db`. No spaces or single quotes in paths. |
 
 PostgreSQL uses `pg_dumpall` (all databases); MySQL dumps only `MYSQL_DATABASE`. Clients are MariaDB (`MARIADB_VERSION` in the `Dockerfile`) and PostgreSQL 15.
+
+SQLite databases are copied with `sqlite3 .backup`, which is consistent while the application keeps writing, to the same path below `/other_data/sqlite`. The directory of a database must be mounted read-write, because SQLite creates files next to it; a read-only mount fails the backup, as does a listed path that is not a file. A large database that is written to constantly can make the copy slow, because it restarts when another connection writes between its steps.
+
+The live database file (and its `-wal`/`-shm` files) is archived under `/data` as well. To keep it out of the archive, exclude it: `EXCLUDE=pf:/data/app.db pf:/data/app.db-wal pf:/data/app.db-shm`.
+
+`restore` copies the SQLite copy over the original path and removes stale `-wal`, `-shm` and `-journal` files. Stop the application that uses the database first, e.g. in a `prepare` hook, and make sure the directory of the database exists.
 
 ### Borg
 
@@ -126,7 +135,7 @@ docker exec <container> prune
 docker exec <container> check
 ```
 
-Individual steps: `backup-borg`, `backup-mysql`, `backup-postgresql`, `sync-rclone`, each taking `backup` (and `restore`, plus `prune`/`check` for `backup-borg`).
+Individual steps: `backup-borg`, `backup-mysql`, `backup-postgresql`, `backup-sqlite`, `sync-rclone`, each taking `backup` (and `restore`, plus `prune`/`check` for `backup-borg`).
 
 ## Restore
 
@@ -138,7 +147,7 @@ docker exec <container> sync-rclone restore
 docker exec -it <container> restore
 ```
 
-`restore` asks for confirmation, runs the `prepare` hooks, extracts the archive to `/` (overwriting `/data`), then loads the PostgreSQL and MySQL dumps into the configured servers. The S3 download is deliberately not part of `restore` because of transfer costs, so do step 1 manually.
+`restore` asks for confirmation, runs the `prepare` hooks, extracts the archive to `/` (overwriting `/data`), copies the SQLite databases back, then loads the PostgreSQL and MySQL dumps into the configured servers. The S3 download is deliberately not part of `restore` because of transfer costs, so do step 1 manually.
 
 ## Build
 
@@ -150,7 +159,7 @@ just verify          # build + backup/prune/check/restore against throwaway Mari
 just release 1.2.0   # verify, push 1.2.0, 1.2, 1 and latest, tag v1.2.0
 ```
 
-`just verify` is self-contained (Docker only). It covers files only, MariaDB, MariaDB with a `prepare` hook and a custom `MYSQL_PORT`, with rclone writing to a local remote instead of S3. Its sample env file and hook are in `test/config`.
+`just verify` is self-contained (Docker only). It covers files only, MariaDB, MariaDB with a `prepare` hook and a custom `MYSQL_PORT`, and SQLite, with rclone writing to a local remote instead of S3. Its sample env file and hook are in `test/config`.
 
 Versions are SemVer for the image interface (env vars, volumes, scripts, behavior): major for breaking changes, minor for features and tool upgrades, patch for fixes. The version is in the `org.opencontainers.image.version` label. Pin consumers to a minor tag such as `1.2`, not `latest`.
 

@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+# shellcheck disable=SC1091
+source /container.env
+
+# Each database is copied to the same path below this directory
+DUMP_ROOT="${OTHER_DATA}/sqlite"
+
+backup() {
+	local -a files
+	local file dest
+	read -ra files <<<"${SQLITE_FILES}"
+	for file in "${files[@]}"; do
+		echo "Backup sqlite database ${file}"
+		# sqlite3 would create an empty database for a missing path
+		if [[ ! -f "${file}" ]]; then
+			echo "ERROR: ${file} is not a file"
+			return 1
+		fi
+		# WAL needs to create -shm next to the database, so a read-only mount does not work
+		if [[ ! -w "$(dirname "${file}")" ]]; then
+			echo "ERROR: $(dirname "${file}") is not writable, mount it read-write to back up ${file}"
+			return 1
+		fi
+		dest="${DUMP_ROOT}${file}"
+		mkdir --parents "$(dirname "${dest}")"
+		# .backup restarts when another connection writes between its steps, so wait for locks
+		sqlite3 "${file}" ".timeout 10000" ".backup '${dest}'"
+		# The app may run as another user than the one that reads the dump on restore
+		chown --reference="${file}" "${dest}"
+		chmod --reference="${file}" "${dest}"
+	done
+}
+
+restore() {
+	local -a files
+	local file dest
+	read -ra files <<<"${SQLITE_FILES}"
+	for file in "${files[@]}"; do
+		echo "Restore sqlite database ${file}"
+		dest="${DUMP_ROOT}${file}"
+		if [[ ! -f "${dest}" ]]; then
+			echo "ERROR: ${dest} not found, nothing to restore for ${file}"
+			return 1
+		fi
+		if [[ ! -d "$(dirname "${file}")" ]]; then
+			echo "ERROR: $(dirname "${file}") does not exist"
+			return 1
+		fi
+		# Copy next to the target so the final rename is atomic
+		cp --preserve=mode,ownership "${dest}" "${file}.restore-tmp"
+		# Leftovers of the replaced database would be applied to the restored one
+		rm --force "${file}-wal" "${file}-shm" "${file}-journal"
+		mv "${file}.restore-tmp" "${file}"
+	done
+}
+
+if [[ -z "${SQLITE_FILES}" ]]; then
+	exit 0
+fi
+
+if [[ $# == 0 || ($# == 1 && $1 == "backup") ]]; then
+	backup
+elif [[ $# == 1 && $1 == "restore" ]]; then
+	restore
+else
+	echo "Operation $* not supported"
+fi
