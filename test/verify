@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Verifies backup, prune, check and restore of an image for four setups: files only, MariaDB,
 # MariaDB with a prepare hook, MariaDB on a custom port, plus EXCLUDE and EXCLUDE_IF_PRESENT,
-# upload after borg warnings, the guard against a replaced repo, numeric owners and RESTORE_UID/GID. Usage: verify IMAGE
+# upload after borg warnings, the guard against a replaced repo, numeric owners and RESTORE_UID/GID,
+# and SQLite databases (consistent copy under writes, restore, rejected paths). Usage: verify IMAGE
 # Deviation from production: rclone uses a local-backend remote instead of AWS S3.
 set -uo pipefail
 
@@ -249,6 +250,117 @@ rm "${W}/port/data/file.txt"
 restore_usage port
 check "port: DB restored" db_has vb-dbport portdb.t port-row
 check "port: RESTORE_UID and RESTORE_GID applied" test "$(docker exec vb-port stat -c %u:%g /data/file.txt /data)" = $'7000:7001\n7000:7001'
+
+# Args: container
+sqlite_rows() {
+	docker exec "$1" sqlite3 /data/app.db "SELECT count(*) FROM t"
+}
+
+# More than 100 pages, the step size of the sqlite3 CLI's .backup, so a writer can overlap a multi-step copy
+seed_sqlite() {
+	docker exec "$1" sh -c '
+		sqlite3 /data/app.db "PRAGMA journal_mode=WAL; CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);
+			WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 3000)
+			INSERT INTO t (v) SELECT hex(randomblob(100)) FROM n;" &&
+		chown 5000:5000 /data/app.db && chmod 640 /data/app.db' >/dev/null
+}
+
+# The live database is excluded, so a restored database can only come from the dump. Stale sidecar files
+# must not survive: a leftover -wal would be applied to the restored database
+delete_sqlite() {
+	docker exec "$1" sh -c '
+		rm -f /data/app.db /data/app.db-wal /data/app.db-shm /data/app.db-journal
+		for s in -wal -shm -journal; do echo stale > "/data/app.db${s}"; done'
+}
+
+# Args: container, expected message, command...; the command must fail and print the message
+fails_with() {
+	local c="$1" msg="$2" out
+	shift 2
+	if out="$(docker exec "${c}" "$@" 2>&1)"; then
+		echo "succeeded: ${out}"
+		return 1
+	fi
+	grep -q "${msg}" <<<"${out}" || { echo "${out}"; return 1; }
+}
+
+# Args: SQLITE_FILES value; the container must refuse to start
+rejects_start() {
+	local out
+	if out="$(docker run --rm -e BORG_PASSPHRASE=x -e BUCKET_NAME=x -e "SQLITE_FILES=$1" "${IMAGE}" true 2>&1)"; then
+		echo "started with SQLITE_FILES=$1"
+		return 1
+	fi
+	grep -q "SQLITE_FILES entries" <<<"${out}" || { echo "${out}"; return 1; }
+}
+
+SQLITE_EXCLUDE="pf:/data/skip pf:/data/app.db pf:/data/app.db-wal pf:/data/app.db-shm"
+
+# A writer keeps inserting while the backup runs
+run_usage sqlite \
+	-e "ARCHIVE_PREFIX=sqlite_${DOMAIN}_" -e "BUCKET_NAME=/remote/${DOMAIN}/sqlite" \
+	-e SQLITE_FILES=/data/app.db -e "EXCLUDE=${SQLITE_EXCLUDE}"
+check "sqlite: database seeded" seed_sqlite vb-sqlite
+docker exec -d vb-sqlite sh -c 'echo $$ > /tmp/writer.pid; while :; do
+	sqlite3 /data/app.db ".timeout 5000" "INSERT INTO t (v) VALUES (hex(randomblob(100)))"; sleep 0.05; done'
+rows_before="$(sqlite_rows vb-sqlite)"
+inspect_backup sqlite sqlite other_data/sqlite/data/app.db
+check "sqlite: writer was active during the backup" test "$(sqlite_rows vb-sqlite)" -gt "${rows_before}"
+docker exec vb-sqlite sh -c 'kill "$(cat /tmp/writer.pid)"'
+sleep 1
+check "sqlite: live database not in archive" docker exec vb-sqlite bash -c '
+	source /container.env
+	archive="$(borg list --glob-archives "${ARCHIVE_PREFIX}*" --last 1 --short "$BORG_REPO")"
+	if borg list --format "{path}{NL}" "$BORG_REPO::$archive" | grep -xE "data/app.db(-wal|-shm)?"; then exit 1; fi'
+
+docker exec vb-sqlite mv /data/app.db /data/app.db.away
+check "sqlite: missing database fails the backup" fails_with vb-sqlite "is not a file" backup
+docker exec vb-sqlite mv /data/app.db.away /data/app.db
+
+delete_sqlite vb-sqlite
+restore_usage sqlite
+check "sqlite: stale sidecar files removed" docker exec vb-sqlite bash -c 'test ! -e /data/app.db-wal -a ! -e /data/app.db-shm -a ! -e /data/app.db-journal'
+check "sqlite: owner and mode restored" test "$(docker exec vb-sqlite stat -c %u:%g:%a /data/app.db)" = 5000:5000:640
+check "sqlite: integrity ok" test "$(docker exec vb-sqlite sqlite3 /data/app.db 'PRAGMA integrity_check')" = ok
+check "sqlite: rows committed before the backup restored" test "$(sqlite_rows vb-sqlite)" -ge "${rows_before}"
+
+# SQLITE_FILES is fixed at start, so the container.env of the running container is pointed at another path
+missing_parent() {
+	docker exec vb-sqlite bash -c '
+		cp /container.env /tmp/container.env.orig
+		sed -i "/SQLITE_FILES=/s#/data/app.db#/data/gone/app.db#" /container.env
+		mkdir -p /other_data/sqlite/data/gone && cp /other_data/sqlite/data/app.db /other_data/sqlite/data/gone/
+		out="$(backup-sqlite restore 2>&1)"; rc=$?
+		cp /tmp/container.env.orig /container.env
+		echo "${out}"
+		[ "${rc}" -ne 0 ] && grep -q "does not exist" <<<"${out}"'
+}
+check "sqlite: restore without parent directory fails" missing_parent
+docker exec vb-sqlite rm -f /other_data/sqlite/data/app.db
+check "sqlite: restore without dump fails" fails_with vb-sqlite "not found" backup-sqlite restore
+
+check "sqlite: relative path rejected at start" rejects_start "app.db"
+check "sqlite: single quote rejected at start" rejects_start "/data/it's.db"
+
+# Same flow with RESTORE_UID and RESTORE_GID, which backup-borg applies to the dump before it is copied back
+run_usage sqliteuid \
+	-e "ARCHIVE_PREFIX=sqliteuid_${DOMAIN}_" -e "BUCKET_NAME=/remote/${DOMAIN}/sqliteuid" \
+	-e SQLITE_FILES=/data/app.db -e "EXCLUDE=${SQLITE_EXCLUDE}" \
+	-e RESTORE_UID=7000 -e RESTORE_GID=7001
+check "sqliteuid: database seeded" seed_sqlite vb-sqliteuid
+check "sqliteuid: backup" docker exec vb-sqliteuid backup
+delete_sqlite vb-sqliteuid
+restore_usage sqliteuid
+check "sqliteuid: RESTORE_UID and RESTORE_GID applied" test "$(docker exec vb-sqliteuid stat -c %u:%g:%a /data/app.db)" = 7000:7001:640
+
+# SQLite needs to create -shm next to the database, so a read-only mount cannot be backed up
+mkdir -p "${W}/sqlite-ro"
+docker run --rm --entrypoint sqlite3 -v "${W}/sqlite-ro:/ro" "${IMAGE}" /ro/app.db "CREATE TABLE t (v)" >/dev/null
+run_usage sqlitero \
+	-v "${W}/sqlite-ro:/ro:ro" \
+	-e "ARCHIVE_PREFIX=sqlitero_${DOMAIN}_" -e "BUCKET_NAME=/remote/${DOMAIN}/sqlitero" \
+	-e SQLITE_FILES=/ro/app.db
+check "sqlitero: read-only directory fails the backup" fails_with vb-sqlitero "read-write" backup
 
 echo
 if ((fail)); then
