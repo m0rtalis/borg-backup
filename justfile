@@ -4,7 +4,7 @@ image := repo + ":latest"
 build tag=image version="dev":
     docker build --build-arg "VERSION={{version}}" -t {{tag}} .
 
-# Backup, prune, check and restore for files only, MariaDB, a prepare hook and a custom port
+# Backup, prune, check and restore for files only, MariaDB, a prepare hook, a custom port and SQLite
 verify: build
     ./test/verify {{image}}
 

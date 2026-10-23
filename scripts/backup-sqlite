@@ -28,7 +28,7 @@ backup() {
 		fi
 		dest="${DUMP_ROOT}${file}"
 		mkdir --parents "$(dirname "${dest}")"
-		# .backup restarts when another connection writes between its steps, so wait for locks
+		# Wait for write locks of rollback-journal databases instead of failing with SQLITE_BUSY
 		sqlite3 "${file}" ".timeout 10000" ".backup '${dest}'"
 		# The app may run as another user than the one that reads the dump on restore
 		chown --reference="${file}" "${dest}"

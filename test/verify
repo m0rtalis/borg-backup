@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verifies backup, prune, check and restore of an image for four setups: files only, MariaDB,
+# Verifies backup, prune, check and restore of an image for these setups: files only, MariaDB,
 # MariaDB with a prepare hook, MariaDB on a custom port, plus EXCLUDE and EXCLUDE_IF_PRESENT,
 # upload after borg warnings, the guard against a replaced repo, numeric owners and RESTORE_UID/GID,
 # and SQLite databases (consistent copy under writes, restore, rejected paths). Usage: verify IMAGE
@@ -10,6 +10,7 @@ IMAGE="${1:?usage: verify IMAGE}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CONFIG="${HERE}/config"
 NET=vb-net
+BASE_EXCLUDE="pf:/data/skip"
 DOMAIN=example.org
 DB_IMAGE="mariadb:$(sed -n 's/^ARG MARIADB_VERSION="\(.*\)"/\1/p' "${HERE}/../Dockerfile")"
 
@@ -111,7 +112,7 @@ run_usage() {
 	docker run -d --label vb-verify --name "${c}" --network "${NET}" --init \
 		--env-file "${CONFIG}/backup.env" \
 		-e RCLONE_CONFIG=/rclone-test/rclone.conf \
-		-e "EXCLUDE=pf:/data/skip" -e "EXCLUDE_IF_PRESENT=.skip-marker" \
+		-e "EXCLUDE=${BASE_EXCLUDE}" -e "EXCLUDE_IF_PRESENT=.skip-marker" \
 		-v "${d}/data:/data" -v "${d}/repo:/repo" -v "vb-app-${name}:/app" \
 		-v "${W}/rclone.conf:/rclone-test/rclone.conf:ro" -v "${W}/remote:/remote" \
 		-v "${W}/sec/borg-repokey:/run/secrets/borg-repokey:ro" \
@@ -251,26 +252,27 @@ restore_usage port
 check "port: DB restored" db_has vb-dbport portdb.t port-row
 check "port: RESTORE_UID and RESTORE_GID applied" test "$(docker exec vb-port stat -c %u:%g /data/file.txt /data)" = $'7000:7001\n7000:7001'
 
-# Args: container
+# Args: container, optional database path
 sqlite_rows() {
-	docker exec "$1" sqlite3 /data/app.db "SELECT count(*) FROM t"
+	docker exec "$1" sqlite3 "${2:-/data/app.db}" "SELECT count(*) FROM t"
 }
 
 # More than 100 pages, the step size of the sqlite3 CLI's .backup, so a writer can overlap a multi-step copy
+# Args: container, optional database path
 seed_sqlite() {
 	docker exec "$1" sh -c '
-		sqlite3 /data/app.db "PRAGMA journal_mode=WAL; CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);
+		sqlite3 "$1" "PRAGMA journal_mode=WAL; CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);
 			WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 3000)
 			INSERT INTO t (v) SELECT hex(randomblob(100)) FROM n;" &&
-		chown 5000:5000 /data/app.db && chmod 640 /data/app.db' >/dev/null
+		chown 5000:5000 "$1" && chmod 640 "$1"' _ "${2:-/data/app.db}" >/dev/null
 }
 
-# The live database is excluded, so a restored database can only come from the dump. Stale sidecar files
-# must not survive: a leftover -wal would be applied to the restored database
+# Stale sidecar files must not survive a restore: a leftover -wal would be applied to the restored database
+# Args: container, optional database path
 delete_sqlite() {
 	docker exec "$1" sh -c '
-		rm -f /data/app.db /data/app.db-wal /data/app.db-shm /data/app.db-journal
-		for s in -wal -shm -journal; do echo stale > "/data/app.db${s}"; done'
+		rm -f "$1" "$1-wal" "$1-shm" "$1-journal"
+		for s in -wal -shm -journal; do echo stale > "$1${s}"; done' _ "${2:-/data/app.db}"
 }
 
 # Args: container, expected message, command...; the command must fail and print the message
@@ -294,7 +296,7 @@ rejects_start() {
 	grep -q "SQLITE_FILES entries" <<<"${out}" || { echo "${out}"; return 1; }
 }
 
-SQLITE_EXCLUDE="pf:/data/skip pf:/data/app.db pf:/data/app.db-wal pf:/data/app.db-shm"
+SQLITE_EXCLUDE="${BASE_EXCLUDE} pf:/data/app.db pf:/data/app.db-wal pf:/data/app.db-shm"
 
 # A writer keeps inserting while the backup runs
 run_usage sqlite \
@@ -341,17 +343,29 @@ check "sqlite: restore without dump fails" fails_with vb-sqlite "not found" back
 
 check "sqlite: relative path rejected at start" rejects_start "app.db"
 check "sqlite: single quote rejected at start" rejects_start "/data/it's.db"
+check "sqlite: path below /other_data rejected at start" rejects_start "/other_data/app.db"
 
 # Same flow with RESTORE_UID and RESTORE_GID, which backup-borg applies to the dump before it is copied back
 run_usage sqliteuid \
 	-e "ARCHIVE_PREFIX=sqliteuid_${DOMAIN}_" -e "BUCKET_NAME=/remote/${DOMAIN}/sqliteuid" \
-	-e SQLITE_FILES=/data/app.db -e "EXCLUDE=${SQLITE_EXCLUDE}" \
+	-e "SQLITE_FILES=/data/app.db /data/live.db" -e "EXCLUDE=${SQLITE_EXCLUDE}" \
 	-e RESTORE_UID=7000 -e RESTORE_GID=7001
+# live.db is not excluded: borg extracts it from /data and backup-sqlite restore must still replace it
 check "sqliteuid: database seeded" seed_sqlite vb-sqliteuid
+check "sqliteuid: second database seeded" seed_sqlite vb-sqliteuid /data/live.db
 check "sqliteuid: backup" docker exec vb-sqliteuid backup
+check "sqliteuid: both databases in the archive" docker exec vb-sqliteuid bash -c '
+	source /container.env
+	archive="$(borg list --glob-archives "${ARCHIVE_PREFIX}*" --last 1 --short "$BORG_REPO")"
+	paths="$(borg list --format "{path}{NL}" "$BORG_REPO::$archive")"
+	for p in other_data/sqlite/data/app.db other_data/sqlite/data/live.db data/live.db; do
+		grep -qx "$p" <<<"$paths" || { echo "missing $p"; exit 1; }
+	done'
+docker exec vb-sqliteuid sqlite3 /data/live.db "DELETE FROM t"
 delete_sqlite vb-sqliteuid
 restore_usage sqliteuid
-check "sqliteuid: RESTORE_UID and RESTORE_GID applied" test "$(docker exec vb-sqliteuid stat -c %u:%g:%a /data/app.db)" = 7000:7001:640
+check "sqliteuid: RESTORE_UID and RESTORE_GID applied" test "$(docker exec vb-sqliteuid stat -c %u:%g:%a /data/app.db /data/live.db)" = $'7000:7001:640\n7000:7001:640'
+check "sqliteuid: unexcluded database restored" test "$(sqlite_rows vb-sqliteuid /data/live.db)" = 3000
 
 # SQLite needs to create -shm next to the database, so a read-only mount cannot be backed up
 mkdir -p "${W}/sqlite-ro"

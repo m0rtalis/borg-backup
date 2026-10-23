@@ -127,6 +127,11 @@ docker_setup_sqlite_env() {
 			echo "SQLITE_FILES entries must be absolute paths without single quotes: '${file}'"
 			exit 1
 		fi
+		# Every backup wipes it before the copy is made
+		if [[ "${file}" == "${OTHER_DATA}"/* ]]; then
+			echo "SQLITE_FILES entries must not be below ${OTHER_DATA}: '${file}'"
+			exit 1
+		fi
 	done
 }
 
