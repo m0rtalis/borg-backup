@@ -111,7 +111,7 @@ SQLite databases are copied with `sqlite3 .backup`, which is consistent while th
 
 The live database file (and its `-wal`/`-shm` files) is archived under `/data` as well. To keep it out of the archive, exclude it: `EXCLUDE=pf:/data/app.db pf:/data/app.db-wal pf:/data/app.db-shm`.
 
-`restore` copies the SQLite copy over the original path and removes stale `-wal`, `-shm` and `-journal` files. Stop the application that uses the database first, e.g. in a `prepare` hook, and make sure the directory of the database exists.
+`restore` copies the SQLite copy over the original path and removes stale `-wal`, `-shm` and `-journal` files. Stop the application that uses the database first, e.g. in a `prepare` hook, and make sure the directory of the database exists. The file is replaced by a rename, so a container that mounts the database as a single file (`./main.db:/main.db`) keeps the old, deleted file until it is restarted; restart it after the restore, or mount the directory instead.
 
 ### Borg
 
